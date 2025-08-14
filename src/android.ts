@@ -382,11 +382,13 @@ export class AndroidRobot implements Robot {
 		}
 
 		const args = ["shell", "logcat"];
+		args.push("-d");
 		if (timeWindow) {
 			// Calculate timestamp for time-based filtering using -T
 			const timeInSeconds = this.parseTimeWindow(timeWindow);
 			const startTime = new Date(Date.now() - (timeInSeconds * 1000));
 			// Format as MM-dd HH:mm:ss.mmm
+			const year = startTime.getFullYear();
 			const month = String(startTime.getMonth() + 1).padStart(2, "0");
 			const day = String(startTime.getDate()).padStart(2, "0");
 			const hours = String(startTime.getHours()).padStart(2, "0");
@@ -394,11 +396,10 @@ export class AndroidRobot implements Robot {
 			const seconds = String(startTime.getSeconds()).padStart(2, "0");
 			const milliseconds = String(startTime.getMilliseconds()).padStart(3, "0");
 
-			const timeFormat = `${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
+			const timeFormat = `"${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}"`;
 			args.push("-T", timeFormat);
-		} else {
-			args.push("-d");
 		}
+
 		// Add package filtering directly to logcat if we have a specific package
 		if (packageFilter && packageFilter !== "mine") {
 			// Use logcat's native package filtering with --pid
@@ -413,8 +414,11 @@ export class AndroidRobot implements Robot {
 				}
 			} catch (error) {
 				// If pidof fails, fall back to post-processing
+				console.log("pidof failed, falling back to post-processing", error);
 			}
 		}
+
+		console.log("Running logcat command:", args.join(" "));
 		const output = this.adb(...args).toString();
 
 		// Post-process filtering
