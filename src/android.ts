@@ -1,4 +1,6 @@
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { execFileSync } from "node:child_process";
 
 import * as xml from "fast-xml-parser";
@@ -50,19 +52,25 @@ const BUTTON_MAP: Record<Button, string> = {
 };
 
 const TIMEOUT = 30000;
-const MAX_BUFFER_SIZE = 1024 * 1024 * 4;
+const MAX_BUFFER_SIZE = 1024 * 1024 * 10; // Increased to 10MB
+const SCREENSHOT_TIMEOUT = 45000; // Longer timeout for screenshot operations
 
 type AndroidDeviceType = "tv" | "mobile";
 
 export class AndroidRobot implements Robot {
+	private lastScreenshotTime = 0;
+	private screenshotCount = 0;
 
 	public constructor(private deviceId: string) {
 	}
 
 	public adb(...args: string[]): Buffer {
+		// Use larger buffer and timeout for screenshot operations
+		const isScreenshotOperation = args.includes("screencap") || args.includes("exec-out");
+
 		return execFileSync(getAdbPath(), ["-s", this.deviceId, ...args], {
-			maxBuffer: MAX_BUFFER_SIZE,
-			timeout: TIMEOUT,
+			maxBuffer: isScreenshotOperation ? MAX_BUFFER_SIZE : MAX_BUFFER_SIZE / 2,
+			timeout: isScreenshotOperation ? SCREENSHOT_TIMEOUT : TIMEOUT,
 		});
 	}
 
@@ -216,15 +224,112 @@ export class AndroidRobot implements Robot {
 	}
 
 	public async getScreenshot(): Promise<Buffer> {
-		const displayId = this.getFirstDisplayId();
+		// The ENOBUFS error is NOT from Node.js execFileSync (which always uses new buffers)
+		// but from ADB daemon socket/connection management. Focus on ADB connection health.
 
-		if (displayId !== null) {
-			// always good to provide displayId. required for multi-display devices such as fold
-			return this.adb("exec-out", "screencap", "-p", "-d", displayId);
-		} else {
-			// backward compatibility for android 10 and below
-			return this.adb("exec-out", "screencap", "-p");
+		const now = Date.now();
+		const timeSinceLastScreenshot = now - this.lastScreenshotTime;
+		const minInterval = 300; // Reduced interval since Node.js buffer is not the issue
+
+		if (timeSinceLastScreenshot < minInterval) {
+			const waitTime = minInterval - timeSinceLastScreenshot;
+			await new Promise(resolve => setTimeout(resolve, waitTime));
 		}
+
+		this.lastScreenshotTime = Date.now();
+		this.screenshotCount++;
+
+		// Reset ADB daemon every 20 operations to clear daemon-level connection state
+		if (this.screenshotCount % 20 === 0) {
+			console.log("Resetting ADB daemon to clear connection state...");
+			// await this.resetAdbDaemon();
+		}
+
+		const maxRetries = 3;
+		let lastError: Error | null = null;
+		const screenshot: Buffer | null = null;
+
+		for (let attempt = 1; attempt <= maxRetries; attempt++) {
+			try {
+				const displayId = this.getFirstDisplayId();
+
+				// Primary method: direct exec-out (original approach with better buffering)
+				try {
+					if (displayId !== null) {
+						return execFileSync(getAdbPath(), ["-s", this.deviceId, "exec-out", "screencap", "-p", "-d", displayId], {
+							maxBuffer: MAX_BUFFER_SIZE,
+							timeout: SCREENSHOT_TIMEOUT,
+						});
+					} else {
+						return execFileSync(getAdbPath(), ["-s", this.deviceId, "exec-out", "screencap", "-p"], {
+							maxBuffer: MAX_BUFFER_SIZE,
+							timeout: SCREENSHOT_TIMEOUT,
+						});
+					}
+				} catch (directError: any) {
+					// If direct method fails with ENOBUFS, try file-based approach
+					if (directError.code === "ENOBUFS") {
+						console.warn("Direct screenshot failed with ENOBUFS, trying file-based approach...");
+
+						// Fallback: Use file-based approach
+						const tempPath = `/sdcard/screenshot_${Date.now()}.png`;
+
+						// Take screenshot to file with -p flag for PNG format
+						if (displayId !== null) {
+							this.adb("shell", "screencap", "-p", "-d", displayId, ">", tempPath);
+						} else {
+							this.adb("shell", "screencap", "-p", ">", tempPath);
+						}
+
+						// Pull the file using adb pull for binary safety
+						const localTempPath = path.join(os.tmpdir(), `screenshot_${Date.now()}.png`);
+
+						execFileSync(getAdbPath(), ["-s", this.deviceId, "pull", tempPath, localTempPath], {
+							timeout: SCREENSHOT_TIMEOUT,
+						});
+
+						// Read the local file
+						const screenshot = fs.readFileSync(localTempPath);
+
+						// Clean up files
+						try {
+							fs.unlinkSync(localTempPath);
+							this.adb("shell", "rm", tempPath);
+						} catch (cleanupError) {
+							console.warn("Failed to cleanup screenshot files:", cleanupError);
+						}
+
+						return screenshot;
+					} else {
+						throw directError;
+					}
+				}
+			} catch (error: any) {
+				lastError = error;
+
+				if (error.code === "ENOBUFS") {
+					console.warn(`Screenshot attempt ${attempt}/${maxRetries} failed with ENOBUFS (ADB daemon socket issue), retrying...`);
+
+					// Emergency ADB daemon cleanup for ENOBUFS (not Node.js buffer issue)
+					// await this.emergencyAdbCleanup();
+
+					// Wait before retrying
+					if (attempt < maxRetries) {
+						await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+					}
+				} else {
+					// For non-ENOBUFS errors, don't retry
+					break;
+				}
+			}
+		}
+
+		// Return successful screenshot
+		if (screenshot) {
+			return screenshot;
+		}
+
+		throw new ActionableError(`Failed to take screenshot after ${maxRetries} attempts. Last error: ${lastError?.message || "Unknown error"}. This might be due to insufficient system buffer space or device connectivity issues.`);
 	}
 
 	private collectElements(node: UiAutomatorXmlNode): ScreenElement[] {

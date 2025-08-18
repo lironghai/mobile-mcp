@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc",
     "lint": "eslint .",
+    "lint-fix": "eslint . --fix",
     "test": "nyc mocha --require ts-node/register test/*.ts",
     "start-http": "node lib/index.js --port 10000",
     "watch": "tsc --watch",

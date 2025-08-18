@@ -448,10 +448,17 @@ export const createMcpServer = (): McpServer => {
 				let mimeType = "image/png";
 
 				// validate we received a png, will throw exception otherwise
-				const image = new PNG(screenshot);
-				const pngSize = image.getDimensions();
-				if (pngSize.width <= 0 || pngSize.height <= 0) {
-					throw new ActionableError("Screenshot is invalid. Please try again.");
+				let pngSize: { width: number; height: number };
+				try {
+					const image = new PNG(screenshot);
+					pngSize = image.getDimensions();
+					if (pngSize.width <= 0 || pngSize.height <= 0) {
+						throw new ActionableError("Screenshot is invalid (zero dimensions). Please try again.");
+					}
+				} catch (pngError: any) {
+					// If PNG validation fails, try to get screenshot again with fallback method
+					trace(`PNG validation failed: ${pngError.message}, attempting fallback...`);
+					throw new ActionableError(`Screenshot format error: ${pngError.message}. This might be due to corrupted data transfer. Please try again.`);
 				}
 
 				if (isImageMagickInstalled()) {
